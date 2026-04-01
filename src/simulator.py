@@ -8,8 +8,7 @@ import pandas as pd
 from src.models import Event, Pod
 from src.policies import Baseline60sPolicy, KeepAlivePolicy, TADKPolicy
 
-_REQUIRED_COLUMNS = {"timestamp", "function_id", "trigger_type", "execution_duration"}
-_VALID_TRIGGER_TYPES = {"TIMER", "API"}
+_REQUIRED_COLUMNS = {"event_time", "func_id", "trigger_type", "exec_time", "cold_start_flag"}
 
 
 class ServerlessSimulator:
@@ -25,6 +24,8 @@ class ServerlessSimulator:
         self._pending_timeouts: dict[str, float] = {}
         self._total_invocations: int = 0
         self._total_cold_starts: int = 0
+        self._baseline_accuracy_matches: int = 0
+        self._total_idle_time: float = 0.0
         self._seq = count()  # tie-breaker for equal timestamps
 
     # ------------------------------------------------------------------
@@ -39,20 +40,14 @@ class ServerlessSimulator:
         if missing:
             raise ValueError(f"CSV is missing required columns: {missing}")
 
-        unexpected_triggers = set(df["trigger_type"].unique()) - _VALID_TRIGGER_TYPES
-        if unexpected_triggers:
-            raise ValueError(
-                f"CSV contains unexpected trigger_type values: {unexpected_triggers}. "
-                f"Expected values in {_VALID_TRIGGER_TYPES}."
-            )
-
         for row in df.itertuples(index=False):
             event = Event(
-                timestamp=float(row.timestamp),
+                timestamp=float(row.event_time),
                 event_type="INVOCATION",
-                function_id=str(row.function_id),
+                function_id=str(row.func_id),
                 trigger_type=str(row.trigger_type),
-                duration=float(row.execution_duration),
+                duration=float(row.exec_time),
+                ground_truth_cold_start=str(row.cold_start_flag).strip().lower() == "true",
             )
             self._event_queue.put((event.timestamp, next(self._seq), event))
 
@@ -77,9 +72,13 @@ class ServerlessSimulator:
         self._total_invocations += 1
 
         fid = event.function_id
-        if fid not in self._active_pods:
+        simulated_cold_start = fid not in self._active_pods
+        if simulated_cold_start:
             # No warm container available — cold start.
             self._total_cold_starts += 1
+
+        if simulated_cold_start == event.ground_truth_cold_start:
+            self._baseline_accuracy_matches += 1
 
         # Create or refresh the pod (immutable replacement, no in-place mutation).
         self._active_pods[fid] = Pod(
@@ -108,6 +107,10 @@ class ServerlessSimulator:
         if self._pending_timeouts.get(fid) != event.timestamp:
             return
 
+        pod = self._active_pods.get(fid)
+        if pod is not None:
+            self._total_idle_time += event.timestamp - pod.last_active
+
         self._active_pods.pop(fid, None)
         self._pending_timeouts.pop(fid, None)
 
@@ -121,8 +124,12 @@ class ServerlessSimulator:
         if self._total_invocations > 0:
             rate = self._total_cold_starts / self._total_invocations
             print(f"Cold Start Rate   : {rate:.2%}")
+            accuracy = self._baseline_accuracy_matches / self._total_invocations
+            print(f"Baseline Accuracy : {accuracy:.2%} ({self._baseline_accuracy_matches}/{self._total_invocations} matches)")
         else:
             print("Cold Start Rate   : N/A")
+            print("Baseline Accuracy : N/A")
+        print(f"Total Idle Time   : {self._total_idle_time:.2f}s")
 
 
 # ------------------------------------------------------------------
@@ -130,7 +137,7 @@ class ServerlessSimulator:
 # ------------------------------------------------------------------
 
 if __name__ == "__main__":
-    TRACE = "data/dummy_trace.csv"
+    TRACE = "data/region2_simulator_input.csv"
 
     print("=== Baseline60sPolicy ===")
     sim_baseline = ServerlessSimulator(Baseline60sPolicy())

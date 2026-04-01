@@ -1,7 +1,5 @@
 from abc import ABC, abstractmethod
 
-VALID_TRIGGER_TYPES = {"TIMER", "API"}
-
 
 class KeepAlivePolicy(ABC):
     """Abstract base class for keep-alive policies.
@@ -19,8 +17,6 @@ class Baseline60sPolicy(KeepAlivePolicy):
     """Static 60-second timeout for all invocations regardless of trigger type."""
 
     def get_timeout(self, function_id: str, trigger_type: str, **kwargs) -> float:
-        if trigger_type not in VALID_TRIGGER_TYPES:
-            raise ValueError(f"Unknown trigger_type '{trigger_type}'. Expected one of {VALID_TRIGGER_TYPES}.")
         return 60.0
 
 
@@ -39,8 +35,6 @@ class TADKPolicy(KeepAlivePolicy):
         self._jitter_buffer = jitter_buffer
 
     def get_timeout(self, function_id: str, trigger_type: str, **kwargs) -> float:
-        if trigger_type == "API":
-            return 20.0
-        if trigger_type == "TIMER":
+        if "timer" in trigger_type.lower():
             return self._timer_interval + self._jitter_buffer
-        raise ValueError(f"Unknown trigger_type '{trigger_type}'. Expected one of {VALID_TRIGGER_TYPES}.")
+        return 20.0
