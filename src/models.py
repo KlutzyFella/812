@@ -29,3 +29,5 @@ class Pod:
     state: str
     # last_active: timestamp of the last invocation
     last_active: float
+    # memory_mb: pod memory size in MB, parsed from the func_id (e.g. ...pool24-600-512 -> 512)
+    memory_mb: int = 0

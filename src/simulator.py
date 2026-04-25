@@ -11,6 +11,17 @@ from src.policies import Baseline60sPolicy, KeepAlivePolicy, TADKPolicy
 _REQUIRED_COLUMNS = {"event_time", "func_id", "trigger_type", "exec_time", "cold_start_flag"}
 
 
+def _parse_memory_mb(func_id: str) -> int:
+    """Extract the memory tier (MB) encoded as the trailing token of func_id.
+
+    Why: trace func_ids look like ``1118---631---pool24-600-512`` where the last
+    ``-``-separated token is the pod's memory size in MB. Used to weight idle
+    time by memory footprint (MB·s).
+    """
+    token = func_id.rsplit("-", 1)[-1]
+    return int(token) if token.isdigit() else 0
+
+
 class ServerlessSimulator:
     """Discrete-Event Simulator for serverless container keep-alive policies."""
 
@@ -25,7 +36,7 @@ class ServerlessSimulator:
         self._total_invocations: int = 0
         self._total_cold_starts: int = 0
         self._baseline_accuracy_matches: int = 0
-        self._total_idle_time: float = 0.0
+        self._total_idle_memory_mbs: float = 0.0
         self._seq = count()  # tie-breaker for equal timestamps
 
     # ------------------------------------------------------------------
@@ -85,6 +96,7 @@ class ServerlessSimulator:
             function_id=fid,
             state="IDLE",
             last_active=event.timestamp + event.duration,
+            memory_mb=_parse_memory_mb(fid),
         )
 
         # Schedule a TIMEOUT event after execution + keep-alive window.
@@ -109,7 +121,8 @@ class ServerlessSimulator:
 
         pod = self._active_pods.get(fid)
         if pod is not None:
-            self._total_idle_time += event.timestamp - pod.last_active
+            idle_seconds = event.timestamp - pod.last_active
+            self._total_idle_memory_mbs += idle_seconds * pod.memory_mb
 
         self._active_pods.pop(fid, None)
         self._pending_timeouts.pop(fid, None)
@@ -129,7 +142,7 @@ class ServerlessSimulator:
         else:
             print("Cold Start Rate   : N/A")
             print("Baseline Accuracy : N/A")
-        print(f"Total Idle Time   : {self._total_idle_time:.2f}s")
+        print(f"Total Idle Memory : {self._total_idle_memory_mbs:,.2f} MB·s")
 
 
 # ------------------------------------------------------------------
