@@ -16,7 +16,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.policies import Baseline60sPolicy, TADKPolicy  # noqa: E402
+from src.policies import Baseline30sPolicy, Baseline60sPolicy, TADKPolicy  # noqa: E402
 from src.simulator import ServerlessSimulator  # noqa: E402
 
 INPUT_DIR = PROJECT_ROOT / "OutputData" / "OutputData"
@@ -27,6 +27,12 @@ DATASETS = [
 ]
 POLICIES = [
     ("Baseline60sPolicy", lambda: Baseline60sPolicy()),
+    ("TADKPolicy(10s)", lambda: TADKPolicy(timer_interval=10.0, jitter_buffer=5.0)),
+]
+# Extra single-dataset comparison: 100k across three policies.
+EXTRA_100K_POLICIES = [
+    ("Baseline60sPolicy", lambda: Baseline60sPolicy()),
+    ("Baseline30sPolicy", lambda: Baseline30sPolicy()),
     ("TADKPolicy(10s)", lambda: TADKPolicy(timer_interval=10.0, jitter_buffer=5.0)),
 ]
 
@@ -90,6 +96,19 @@ def main() -> int:
     print()
     print(format_markdown(results))
     print()
+
+    # Extra evaluation: 100k across three policies.
+    extra_csv = INPUT_DIR / "region2_100000_simulator_input.csv"
+    extra_results: list[RunResult] = []
+    if extra_csv.exists():
+        for policy_name, factory in EXTRA_100K_POLICIES:
+            print(f"[run]  100k  {policy_name}  (extra)", file=sys.stderr, flush=True)
+            extra_results.append(run_one("100k", extra_csv, policy_name, factory))
+
+        print("## 100k Three-Way Policy Comparison")
+        print()
+        print(format_markdown(extra_results))
+        print()
     return 0
 
 

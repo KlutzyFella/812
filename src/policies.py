@@ -20,6 +20,13 @@ class Baseline60sPolicy(KeepAlivePolicy):
         return 60.0
 
 
+class Baseline30sPolicy(KeepAlivePolicy):
+    """Static 30-second timeout for all invocations regardless of trigger type."""
+
+    def get_timeout(self, function_id: str, trigger_type: str, **kwargs) -> float:
+        return 30.0
+
+
 class TADKPolicy(KeepAlivePolicy):
     """Trigger-Aware Dynamic Keep-Alive policy.
 
