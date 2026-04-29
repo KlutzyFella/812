@@ -1,14 +1,34 @@
 from __future__ import annotations
 
-import queue
+import heapq
 from itertools import count
 
 import pandas as pd
 
-from src.models import Event, Pod
+from src.models import Event, Pod, SimulationMetrics
 from src.policies import Baseline60sPolicy, KeepAlivePolicy, TADKPolicy
 
 _REQUIRED_COLUMNS = {"event_time", "func_id", "trigger_type", "exec_time", "cold_start_flag"}
+
+_TRUTHY_COLD_START = {"1", "true", "t", "yes", "y"}
+_FALSY_COLD_START = {"0", "false", "f", "no", "n", ""}
+
+
+def _parse_cold_start_flag(raw: object) -> bool:
+    """Parse a CSV cold_start_flag cell into a bool.
+
+    Why: traces use either ``0``/``1`` (Huawei) or ``"true"``/``"false"`` (legacy).
+    The previous ``str.lower() == "true"`` check silently returned False for the
+    integer encoding, making Baseline Accuracy meaningless on those datasets.
+    """
+    if isinstance(raw, bool):
+        return raw
+    token = str(raw).strip().lower()
+    if token in _TRUTHY_COLD_START:
+        return True
+    if token in _FALSY_COLD_START:
+        return False
+    raise ValueError(f"Unrecognized cold_start_flag value: {raw!r}")
 
 
 def _parse_memory_mb(func_id: str) -> int:
@@ -27,7 +47,10 @@ class ServerlessSimulator:
 
     def __init__(self, policy: KeepAlivePolicy) -> None:
         self._policy = policy
-        self._event_queue: queue.PriorityQueue = queue.PriorityQueue()
+        # Plain list driven by heapq — single-threaded, no lock overhead.
+        # Items are 3-tuples (timestamp, seq, event) so equal timestamps fall
+        # back to FIFO via the monotonic sequence counter.
+        self._event_queue: list[tuple[float, int, Event]] = []
         self._virtual_clock: float = 0.0
         self._active_pods: dict[str, Pod] = {}
         # Maps function_id -> the timestamp of the most recently scheduled TIMEOUT.
@@ -37,6 +60,9 @@ class ServerlessSimulator:
         self._total_cold_starts: int = 0
         self._baseline_accuracy_matches: int = 0
         self._total_idle_memory_mbs: float = 0.0
+        # Per-function breakdown for research-grade reporting; keyed by func_id.
+        # Schema kept in sync with SimulationMetrics.per_function_stats.
+        self._func_stats: dict[str, dict] = {}
         self._seq = count()  # tie-breaker for equal timestamps
 
     # ------------------------------------------------------------------
@@ -58,18 +84,18 @@ class ServerlessSimulator:
                 function_id=str(row.func_id),
                 trigger_type=str(row.trigger_type),
                 duration=float(row.exec_time),
-                ground_truth_cold_start=str(row.cold_start_flag).strip().lower() == "true",
+                ground_truth_cold_start=_parse_cold_start_flag(row.cold_start_flag),
             )
-            self._event_queue.put((event.timestamp, next(self._seq), event))
+            heapq.heappush(self._event_queue, (event.timestamp, next(self._seq), event))
 
     # ------------------------------------------------------------------
     # Simulation loop
     # ------------------------------------------------------------------
 
-    def run(self) -> None:
-        """Process all events in chronological order and print metrics."""
-        while not self._event_queue.empty():
-            _, _, event = self._event_queue.get()
+    def run(self) -> SimulationMetrics:
+        """Process all events in chronological order, print, and return metrics."""
+        while self._event_queue:
+            _, _, event = heapq.heappop(self._event_queue)
             self._virtual_clock = event.timestamp
 
             if event.event_type == "INVOCATION":
@@ -78,6 +104,24 @@ class ServerlessSimulator:
                 self._handle_timeout(event)
 
         self._print_metrics()
+        return self._build_metrics()
+
+    def _build_metrics(self) -> SimulationMetrics:
+        if self._total_invocations > 0:
+            cold_rate = self._total_cold_starts / self._total_invocations
+            accuracy: float | None = self._baseline_accuracy_matches / self._total_invocations
+        else:
+            cold_rate = 0.0
+            accuracy = None
+        return SimulationMetrics(
+            total_invocations=self._total_invocations,
+            total_cold_starts=self._total_cold_starts,
+            cold_start_rate=cold_rate,
+            idle_memory_mb_seconds=self._total_idle_memory_mbs,
+            baseline_accuracy_matches=self._baseline_accuracy_matches,
+            baseline_accuracy=accuracy,
+            per_function_stats=self._func_stats,
+        )
 
     def _handle_invocation(self, event: Event) -> None:
         self._total_invocations += 1
@@ -91,10 +135,24 @@ class ServerlessSimulator:
         if simulated_cold_start == event.ground_truth_cold_start:
             self._baseline_accuracy_matches += 1
 
+        # Per-function tally — separate from aggregate counters; arithmetic
+        # for aggregates above is unchanged.
+        stats = self._func_stats.setdefault(
+            fid,
+            {
+                "trigger_type": str(event.trigger_type),
+                "total_invocations": 0,
+                "total_cold_starts": 0,
+                "total_idle_memory_mbs": 0.0,
+            },
+        )
+        stats["total_invocations"] += 1
+        if simulated_cold_start:
+            stats["total_cold_starts"] += 1
+
         # Create or refresh the pod (immutable replacement, no in-place mutation).
         self._active_pods[fid] = Pod(
             function_id=fid,
-            state="IDLE",
             last_active=event.timestamp + event.duration,
             memory_mb=_parse_memory_mb(fid),
         )
@@ -110,7 +168,7 @@ class ServerlessSimulator:
             function_id=fid,
             trigger_type=event.trigger_type,
         )
-        self._event_queue.put((timeout_ts, next(self._seq), timeout_event))
+        heapq.heappush(self._event_queue, (timeout_ts, next(self._seq), timeout_event))
 
     def _handle_timeout(self, event: Event) -> None:
         fid = event.function_id
@@ -122,7 +180,11 @@ class ServerlessSimulator:
         pod = self._active_pods.get(fid)
         if pod is not None:
             idle_seconds = event.timestamp - pod.last_active
-            self._total_idle_memory_mbs += idle_seconds * pod.memory_mb
+            idle_mbs = idle_seconds * pod.memory_mb
+            self._total_idle_memory_mbs += idle_mbs
+            stats = self._func_stats.get(fid)
+            if stats is not None:
+                stats["total_idle_memory_mbs"] += idle_mbs
 
         self._active_pods.pop(fid, None)
         self._pending_timeouts.pop(fid, None)

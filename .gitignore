@@ -34,3 +34,19 @@ htmlcov/
 .idea/
 .vscode/
 *.swp
+
+# LaTeX build artifacts
+paper/
+review_results/
+paper/*.aux
+paper/*.bbl
+paper/*.blg
+paper/*.log
+paper/*.out
+paper/*.toc
+paper/*.fdb_latexmk
+paper/*.fls
+paper/*.synctex.gz
+paper/*.lof
+paper/*.lot
+paper/sections/*.aux

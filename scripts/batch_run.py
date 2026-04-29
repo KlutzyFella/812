@@ -6,10 +6,11 @@ the resulting metric attributes off each ServerlessSimulator instance.
 from __future__ import annotations
 
 import contextlib
+import csv
 import io
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 # Make `src` importable when run from project root.
@@ -45,6 +46,7 @@ class RunResult:
     cold_starts: int
     cold_start_rate: float
     idle_memory_mbs: float
+    per_function_stats: dict[str, dict] = field(default_factory=dict)
 
 
 def run_one(dataset: str, csv_path: Path, policy_name: str, policy_factory) -> RunResult:
@@ -52,10 +54,10 @@ def run_one(dataset: str, csv_path: Path, policy_name: str, policy_factory) -> R
     sim.load_trace(str(csv_path))
     # Suppress simulator's own print output so our table stays clean.
     with contextlib.redirect_stdout(io.StringIO()):
-        sim.run()
+        metrics = sim.run()
 
-    total = sim._total_invocations
-    cold = sim._total_cold_starts
+    total = metrics.total_invocations
+    cold = metrics.total_cold_starts
     rate = (cold / total * 100.0) if total else 0.0
     return RunResult(
         dataset=dataset,
@@ -63,8 +65,41 @@ def run_one(dataset: str, csv_path: Path, policy_name: str, policy_factory) -> R
         total_requests=total,
         cold_starts=cold,
         cold_start_rate=rate,
-        idle_memory_mbs=sim._total_idle_memory_mbs,
+        idle_memory_mbs=metrics.idle_memory_mb_seconds,
+        per_function_stats=metrics.per_function_stats,
     )
+
+
+PER_FUNCTION_CSV_HEADERS = [
+    "dataset_size",
+    "policy_name",
+    "func_id",
+    "trigger_type",
+    "total_invocations",
+    "total_cold_starts",
+    "total_idle_memory_mbs",
+]
+
+
+def write_per_function_csv(results: list[RunResult], output_path: Path) -> int:
+    """Flatten per-function stats from each RunResult into one CSV. Returns row count."""
+    rows_written = 0
+    with output_path.open("w", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(PER_FUNCTION_CSV_HEADERS)
+        for r in results:
+            for func_id, stats in r.per_function_stats.items():
+                writer.writerow([
+                    r.dataset,
+                    r.policy,
+                    func_id,
+                    stats.get("trigger_type", ""),
+                    stats.get("total_invocations", 0),
+                    stats.get("total_cold_starts", 0),
+                    stats.get("total_idle_memory_mbs", 0.0),
+                ])
+                rows_written += 1
+    return rows_written
 
 
 def format_markdown(results: list[RunResult]) -> str:
@@ -109,6 +144,10 @@ def main() -> int:
         print()
         print(format_markdown(extra_results))
         print()
+
+        per_func_csv = PROJECT_ROOT / "per_function_results_100k.csv"
+        rows = write_per_function_csv(extra_results, per_func_csv)
+        print(f"[csv]  wrote {rows:,} per-function rows to {per_func_csv}", file=sys.stderr)
     return 0
 
 

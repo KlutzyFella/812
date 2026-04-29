@@ -61,3 +61,10 @@ class SimulationMetrics:
     idle_memory_mb_seconds: float
     baseline_accuracy_matches: int
     baseline_accuracy: float | None = None
+    # Per-function breakdown: func_id -> {
+    #   "trigger_type": str,
+    #   "total_invocations": int,
+    #   "total_cold_starts": int,
+    #   "total_idle_memory_mbs": float,
+    # }
+    per_function_stats: dict[str, dict] = field(default_factory=dict)
